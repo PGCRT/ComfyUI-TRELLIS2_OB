@@ -1,5 +1,26 @@
 """ComfyUI-TRELLIS2 Nodes."""
 
+# Compatibility shim: flex_gemm was renamed from flex_gemm_ap in v1.0.
+# comfy-sparse-attn (PyPI) still imports flex_gemm_ap; register aliases in
+# sys.modules so both detect.py and ops_sparse.py find the right package.
+# This is a no-op in the main ComfyUI process (flex_gemm not on its path).
+try:
+    import sys as _sys
+    import flex_gemm as _fg
+    import flex_gemm.ops as _fg_ops
+    import flex_gemm.ops.spconv as _fg_spconv
+    import flex_gemm.ops.spconv.submanifold_conv3d as _fg_subm
+    for _old, _new in [
+        ("flex_gemm_ap",                                  _fg),
+        ("flex_gemm_ap.ops",                              _fg_ops),
+        ("flex_gemm_ap.ops.spconv",                       _fg_spconv),
+        ("flex_gemm_ap.ops.spconv.submanifold_conv3d",    _fg_subm),
+    ]:
+        _sys.modules.setdefault(_old, _new)
+    del _sys, _fg, _fg_ops, _fg_spconv, _fg_subm, _old, _new
+except ImportError:
+    pass  # Main ComfyUI process — flex_gemm lives only in the pixi env
+
 # Stage sparse primitives under the comfy namespace so that model code can
 # import from comfy.sparse / comfy.ops_sparse / comfy.attention_sparse as if
 # the upstream PR were already merged.  setup_link is a no-op when ComfyUI

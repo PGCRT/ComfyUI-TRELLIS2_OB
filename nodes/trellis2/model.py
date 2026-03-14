@@ -16,7 +16,36 @@ import numpy as np
 import comfy.ops
 import comfy.patcher_extension
 
-from .attention_sparse import scaled_dot_product_attention, sparse_scaled_dot_product_attention, dispatch_varlen_attention
+from .attention_sparse import sparse_scaled_dot_product_attention, dispatch_varlen_attention
+
+
+def _dense_sdpa(q_or_qkv, k_or_kv=None, v=None, **kwargs):
+    """Drop-in replacement for comfy.attention_sparse.scaled_dot_product_attention
+    using PyTorch native SDPA (Flash Attention 2 when available).
+
+    Handles all three calling conventions used in this file:
+      _dense_sdpa(q, k, v)         — q/k/v: (B, L, H, D)
+      _dense_sdpa(qkv)             — qkv:   (B, L, 3, H, D)
+      _dense_sdpa(q, kv)           — q:     (B, L, H, D), kv: (B, Lkv, 2, H, D)
+
+    SAGE attention is intentionally bypassed here — it requires sequence lengths
+    divisible by its block size, which TRELLIS2 tensors do not guarantee.
+    """
+    if k_or_kv is None:
+        # packed qkv: (B, L, 3, H, D)
+        q, k, v = q_or_qkv.unbind(dim=2)
+    elif v is None:
+        # q + packed kv: (B, Lkv, 2, H, D)
+        q = q_or_qkv
+        k, v = k_or_kv.unbind(dim=2)
+    else:
+        q, k, v = q_or_qkv, k_or_kv, v
+    # (B, L, H, D) -> (B, H, L, D) for F.scaled_dot_product_attention
+    q = q.transpose(1, 2)
+    k = k.transpose(1, 2)
+    v = v.transpose(1, 2)
+    out = F.scaled_dot_product_attention(q, k, v)
+    return out.transpose(1, 2)  # -> (B, L, H, D)
 from .sparse import VarLenTensor, SparseTensor, sparse_cat, get_debug
 from .ops_sparse import manual_cast as sparse_ops
 
@@ -274,9 +303,9 @@ class MultiHeadAttention(nn.Module):
                         assert phases is not None, "Phases must be provided for RoPE"
                         q = RotaryPositionEmbedder.apply_rotary_embedding(q, phases)
                         k = RotaryPositionEmbedder.apply_rotary_embedding(k, phases)
-                    h = scaled_dot_product_attention(q, k, v, transformer_options=transformer_options)
+                    h = _dense_sdpa(q, k, v)
                 else:
-                    h = scaled_dot_product_attention(qkv, transformer_options=transformer_options)
+                    h = _dense_sdpa(qkv)
             elif self.attn_mode == "windowed":
                 raise NotImplementedError("Windowed attention is not yet implemented")
         else:
@@ -289,9 +318,9 @@ class MultiHeadAttention(nn.Module):
                 q = self.q_rms_norm(q)
                 k, v = kv.unbind(dim=2)
                 k = self.k_rms_norm(k)
-                h = scaled_dot_product_attention(q, k, v, transformer_options=transformer_options)
+                h = _dense_sdpa(q, k, v)
             else:
-                h = scaled_dot_product_attention(q, kv, transformer_options=transformer_options)
+                h = _dense_sdpa(q, kv)
         h = h.reshape(B, L, -1)
         h = self.to_out(h)
         return h

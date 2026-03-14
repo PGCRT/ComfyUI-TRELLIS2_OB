@@ -14,7 +14,6 @@ from PIL import Image
 import comfy.ops
 import comfy.model_management
 import comfy.utils
-from .attention_sparse import scaled_dot_product_attention
 
 ops = comfy.ops.manual_cast
 log = logging.getLogger("trellis2")
@@ -135,12 +134,12 @@ class Attention(nn.Module):
         if position_embeddings is not None:
             cos, sin = position_embeddings
             q, k = _apply_rope(q, k, cos, sin)
-        # Use ComfyUI-native attention dispatch
-        # scaled_dot_product_attention expects (B, L, H, D) format
-        q = q.transpose(1, 2)  # (B, H, N, D) -> (B, N, H, D)
-        k = k.transpose(1, 2)
-        v = v.transpose(1, 2)
-        out = scaled_dot_product_attention(q, k, v)
+        # Use PyTorch native SDPA (Flash Attention 2 when available).
+        # DinoV3 is dense — SAGE/sparse attention is not needed here and
+        # crashes when sequence length (patches + prefix tokens) is not
+        # divisible by SAGE's block size.
+        out = F.scaled_dot_product_attention(q, k, v)  # (B, H, N, D)
+        out = out.transpose(1, 2)  # -> (B, N, H, D)
         return self.o_proj(out.contiguous().reshape(B, N, -1))
 
 
